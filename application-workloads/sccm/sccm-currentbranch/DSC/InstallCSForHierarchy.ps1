@@ -19,13 +19,14 @@ if(!(Test-Path $cmpath))
     "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] Copying SCCM installation source..." | Out-File -Append $logpath
     $cmurl = "https://go.microsoft.com/fwlink/?linkid=2093192"
     Invoke-WebRequest -Uri $cmurl -OutFile $cmpath
-    if(!(Test-Path $cmsourcepath))
+    if(!(Test-Path $cmsourceextractpath))
     {
-        Start-Process -Filepath ($cmpath) -ArgumentList ('/x:"' + $cmsourceextractpath + '"','/q') -wait
+        New-Item -ItemType Directory -Path $cmsourceextractpath
+        Start-Process -WorkingDirectory ($cmsourceextractpath) -Filepath ($cmpath) -ArgumentList ('/s') -wait
     }
 }
 
-$cmsourcepath = "$cmsourceextractpath\cd.retail"
+$cmsourcepath = (Get-ChildItem -Path $cmsourceextractpath | ?{$_.Name.ToLower().Contains("cd.")}).FullName
 $CMINIPath = "$cmsourceextractpath\HierarchyCS.ini"
 "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] Check ini file." | Out-File -Append $logpath
 
@@ -111,7 +112,7 @@ $Configuration.UpgradeSCCM.Status = 'Running'
 $Configuration.UpgradeSCCM.StartTime = Get-Date -format "yyyy-MM-dd HH:mm:ss"
 $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 
-Start-Sleep -econds 120
+Start-Sleep -Seconds 120
 $logpath = $ProvisionToolPath+"\UpgradeCMlog.txt"
 $SiteCode =  Get-ItemPropertyValue -Path 'HKLM:\SOFTWARE\Microsoft\SMS\Identification' -Name 'Site Code'
 
@@ -149,8 +150,9 @@ New-CMAdministrativeUser -Name $CMUser -RoleName "Full Administrator" -SecurityS
 "Done" | Out-File -Append $logpath
 
 #Add PS computer account as CM administrative user
-"Setting $PSComputerAccount as CM administrative user." | Out-File -Append $logpath
-New-CMAdministrativeUser -Name $PSComputerAccount  -RoleName "Full Administrator" -SecurityScopeName "All","All Systems","All Users and User Groups"
+$ComputerAccount = $PSComputerAccount.Split('$')[0]
+"Setting $ComputerAccount as CM administrative user." | Out-File -Append $logpath
+New-CMAdministrativeUser -Name $ComputerAccount  -RoleName "Full Administrator" -SecurityScopeName "All","All Systems","All Users and User Groups"
 "Done" | Out-File -Append $logpath
 
 $upgradingfailed = $false
@@ -168,6 +170,33 @@ while($DMPState -ne "Running")
 }
 
 "Current SMS_DMP_DOWNLOADER state is : $DMPState " | Out-File -Append $logpath
+
+"[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] Trying to enable CAS EnableSCCMManagedCert." | Out-File -Append $logpath
+
+#Configure CAS EnableSCCMManagedCert
+$WmiObjectNameSpace = "root\SMS\site_$($SiteCode)"
+#Get component
+$wmiObject = Get-WmiObject -Namespace $WmiObjectNameSpace -class SMS_SCI_Component -Filter "ComponentName='SMS_SITE_COMPONENT_MANAGER'"| where-object {$_.SiteCode -eq $SiteCode}
+
+#Get embeded property
+$props = $wmiObject.Props
+$index = 0
+foreach($oProp in $props)
+{
+    if($oProp.PropertyName -eq 'IISSSLState')
+    {
+        $v = $oProp.Value
+        "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] IISSSLState previous value is $v." | Out-File -Append $logpath
+        $oProp.Value = '1216'
+        $props[$index] = $oProp
+    }
+    $index++
+}
+
+$WmiObject.Props = $props
+$wmiObject.Put()
+
+"[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] Set the IISSSLState 1216, you could check it manually" | Out-File -Append $logpath
 
 #get the available update
 function getupdate()
@@ -419,7 +448,6 @@ $Configuration | ConvertTo-Json | Out-File -FilePath $ConfigurationFile -Force
 $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSRole
 while(!$PSSystemServer)
 {
-    "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] 111" | Out-File -Append $logpath
     "[$(Get-Date -format "MM/dd/yyyy HH:mm:ss")] Wait for PS finished installing, will try 60 seconds later..." | Out-File -Append $logpath
     Start-Sleep -Seconds 60
     $PSSystemServer = Get-CMSiteSystemServer -SiteCode $PSRole
